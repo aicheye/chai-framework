@@ -261,12 +261,20 @@ impl<T: ChaiApp + Send + 'static> Drop for ChaiServer<T> {
     }
 }
 
-pub fn load_host_keys(key_path: Option<&str>) -> Result<russh::keys::PrivateKey, anyhow::Error> {
-    let key_path = std::env::var("CHAI_HOST_KEY_PATH")
-        .ok()
-        .or(key_path.map(|s| s.to_string()))
-        .unwrap_or_else(|| "./authorized_keys/ed_25519".to_string());
-    let key_path = Path::new(&key_path);
+pub fn load_host_keys(
+    key_path: Option<&str>,
+    key_name: Option<&str>,
+) -> Result<russh::keys::PrivateKey, anyhow::Error> {
+    let key_path = if let Ok(env_path) = std::env::var("CHAI_HOST_KEY_PATH") {
+        let key_name = key_name.unwrap_or("ed_25519");
+        Path::new(&env_path).join(key_name)
+    } else if let Some(path) = key_path {
+        let key_name = key_name.unwrap_or("ed_25519");
+        Path::new(path).join(key_name)
+    } else {
+        let key_name = key_name.unwrap_or("ed_25519");
+        Path::new("./examples/authorized_keys").join(key_name)
+    };
 
     if !key_path.exists() {
         return Err(anyhow::anyhow!(
