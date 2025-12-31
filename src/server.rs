@@ -69,13 +69,15 @@ impl std::io::Write for TerminalHandle {
 #[derive(Clone)]
 pub struct AppServer<T: ChaiApp + Send + 'static> {
     clients: Arc<Mutex<HashMap<usize, (SshTerminal, T)>>>,
+    port: u16,
     id: usize,
 }
 
 impl<T: ChaiApp + Send + 'static> AppServer<T> {
-    pub fn new() -> Self {
+    pub fn new(port: u16) -> Self {
         Self {
             clients: Arc::new(Mutex::new(HashMap::new())),
+            port,
             id: 0,
         }
     }
@@ -125,13 +127,8 @@ impl<T: ChaiApp + Send + 'static> AppServer<T> {
             ..Default::default()
         };
 
-        let port: u16 = env::var("PORT")
-            .unwrap_or("22".to_string())
-            .parse()
-            .unwrap_or(22);
-
-        println!("Running Chai Server on port {}", port);
-        self.run_on_address(Arc::new(config), ("0.0.0.0", port))
+        println!("Running Chai Server on port {}", self.port);
+        self.run_on_address(Arc::new(config), ("0.0.0.0", self.port))
             .await?;
         Ok(())
     }
