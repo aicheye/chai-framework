@@ -43,7 +43,7 @@ impl ChaiApp for MyApp {
 
 #[tokio::main]
 async fn main() {
-    let host_key = load_host_keys(None).expect("Failed to load host keys");
+    let host_key = load_host_keys(None, None).expect("Failed to load host keys");
     let mut methods = MethodSet::empty();
     methods.push(MethodKind::None);
 
