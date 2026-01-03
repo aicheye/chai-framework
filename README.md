@@ -33,4 +33,7 @@ async fn main() {
 
 For examples, see [here](https://github.com/kllarena07/chai/tree/main/examples).
 
-_Made with ❤️ by [krayondev](https://x.com/krayondev)_
+## Contributors
+<a href="https://github.com/kllarena07/chai-framework/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=kllarena07/chai-framework" />
+</a>
