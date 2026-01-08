@@ -31,7 +31,7 @@ async fn main() {
 }
 ```
 
-For examples, see [here](https://github.com/kllarena07/chai/tree/main/examples).
+For examples, see [here](https://github.com/kllarena07/chai/tree/main/examples). Simply run `cargo run --example [example name]`.
 
 ## Contributors
 <a href="https://github.com/kllarena07/chai-framework/graphs/contributors">
