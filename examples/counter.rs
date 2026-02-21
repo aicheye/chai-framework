@@ -9,11 +9,12 @@ use russh::{MethodKind, MethodSet, server::Config};
 #[derive(Copy, Clone)]
 pub struct MyApp {
     pub counter: usize,
+    pub quit: bool,
 }
 
 impl ChaiApp for MyApp {
     fn new() -> Self {
-        Self { counter: 0 }
+        Self { counter: 0, quit: false }
     }
     fn update(&mut self) {
         self.counter += 1;
@@ -30,14 +31,19 @@ impl ChaiApp for MyApp {
             .alignment(ratatui::layout::Alignment::Center)
             .style(style);
         let block = Block::default()
-            .title("Press 'c' to reset the counter!")
+            .title("Press 'c' to reset  |  'q' to quit")
             .borders(Borders::ALL);
         f.render_widget(paragraph.block(block), area);
     }
     fn handle_input(&mut self, data: &[u8]) {
-        if data == b"c" {
-            self.counter = 0;
+        match data {
+            b"c" => self.counter = 0,
+            b"q" | b"Q" => self.quit = true,
+            _ => {}
         }
+    }
+    fn should_quit(&self) -> bool {
+        self.quit
     }
 }
 
