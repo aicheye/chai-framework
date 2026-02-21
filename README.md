@@ -20,13 +20,15 @@ use chai_framework::{ChaiApp, ChaiServer, load_host_keys};
 
 #[tokio::main]
 async fn main() {
+    // this loads a host key from ~/.ssh/id_ed25519
     let host_key = load_system_host_keys("id_ed25519");
+    let port = 2222;
     let config = Config {
-        // server config here
+        // other server config here
         keys: vec![host_key],
     };
 
-    let mut server = ChaiServer::<MyApp>::new(2222);
+    let mut server = ChaiServer::<MyApp>::new(port);
     server.run(config).await.expect("Failed running server");
 }
 ```
