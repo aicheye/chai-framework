@@ -1,3 +1,48 @@
+impl<T: ChaiApp + Send + 'static> ChaiServer<T> {
+    /// Helper to get a mutable reference to a client, logging a warning if not found.
+    fn get_client_mut<'a>(
+        &self,
+        clients: &'a mut HashMap<usize, (SshTerminal, T)>,
+        context: &str,
+        id: usize,
+    ) -> Option<(&'a mut SshTerminal, &'a mut T)> {
+        match clients.get_mut(&id) {
+            Some((terminal, app)) => Some((terminal, app)),
+            None => {
+                tracing::warn!("No client found for id {} in {}", id, context);
+                None
+            }
+        }
+    }
+
+    /// Helper to get a mutable reference to a client, logging a warning if not found, but only needs terminal.
+    fn get_terminal_mut<'a>(
+        &self,
+        clients: &'a mut HashMap<usize, (SshTerminal, T)>,
+        context: &str,
+        id: usize,
+    ) -> Option<&'a mut SshTerminal> {
+        match clients.get_mut(&id) {
+            Some((terminal, _)) => Some(terminal),
+            None => {
+                tracing::warn!("No client found for id {} in {}", id, context);
+                None
+            }
+        }
+    }
+
+    /// Helper to draw the app, logging error if it fails.
+    fn try_draw(&self, terminal: &mut SshTerminal, app: &mut T) {
+        if let Err(e) = terminal.draw(|f| app.draw(f)) {
+            tracing::error!(
+                "Terminal draw error for user {} (id: {}): {:?}",
+                self.username,
+                self.id,
+                e
+            );
+        }
+    }
+}
 use crate::chai::ChaiApp;
 
 use std::collections::HashMap;
@@ -12,7 +57,7 @@ use russh::keys::ssh_key::PublicKey;
 use russh::server::*;
 use russh::{Channel, ChannelId, Pty};
 use tokio::sync::Mutex;
-use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
+use tokio::sync::mpsc::{Sender, channel, error::TrySendError};
 
 const ENTER_ALT_SCREEN: &[u8] = b"\x1b[?1049h";
 const EXIT_ALT_SCREEN: &[u8] = b"\x1b[?1049l";
@@ -22,14 +67,20 @@ const SHOW_CURSOR: &[u8] = b"\x1b[?25h";
 type SshTerminal = Terminal<CrosstermBackend<TerminalHandle>>;
 
 struct TerminalHandle {
-    sender: UnboundedSender<Vec<u8>>,
+    sender: Sender<Vec<u8>>,
     // The sink collects the data which is finally sent to sender.
     sink: Vec<u8>,
 }
 
 impl TerminalHandle {
-    async fn start(handle: Handle, channel_id: ChannelId, username: String, id: usize) -> Self {
-        let (sender, mut receiver) = unbounded_channel::<Vec<u8>>();
+    async fn start(
+        handle: Handle,
+        channel_id: ChannelId,
+        username: String,
+        id: usize,
+        buffer: usize,
+    ) -> Self {
+        let (sender, mut receiver) = channel::<Vec<u8>>(buffer);
         let username_clone = username.clone();
         let id_clone = id;
         tokio::spawn(async move {
@@ -58,12 +109,18 @@ impl std::io::Write for TerminalHandle {
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        let result = self.sender.send(self.sink.clone());
-        if result.is_err() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                result.unwrap_err(),
-            ));
+        match self.sender.try_send(self.sink.clone()) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                // Consumer is slow; drop this frame rather than block the async runtime.
+                tracing::debug!("terminal output buffer full, dropping frame");
+            }
+            Err(TrySendError::Closed(_)) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "terminal channel closed",
+                ));
+            }
         }
 
         self.sink.clear();
@@ -71,12 +128,29 @@ impl std::io::Write for TerminalHandle {
     }
 }
 
-#[derive(Clone)]
+const DEFAULT_MAX_CONNECTIONS: usize = 100;
+const DEFAULT_CHANNEL_BUFFER: usize = 64;
+
 pub struct ChaiServer<T: ChaiApp + Send + 'static> {
     clients: Arc<Mutex<HashMap<usize, (SshTerminal, T)>>>,
     port: u16,
     id: usize,
     username: String,
+    max_connections: usize,
+    channel_buffer: usize,
+}
+
+impl<T: ChaiApp + Send + 'static> Clone for ChaiServer<T> {
+    fn clone(&self) -> Self {
+        Self {
+            clients: self.clients.clone(),
+            port: self.port,
+            id: self.id,
+            username: self.username.clone(),
+            max_connections: self.max_connections,
+            channel_buffer: self.channel_buffer,
+        }
+    }
 }
 
 impl<T: ChaiApp + Send + 'static> ChaiServer<T> {
@@ -86,7 +160,22 @@ impl<T: ChaiApp + Send + 'static> ChaiServer<T> {
             port,
             id: 0,
             username: String::new(),
+            max_connections: DEFAULT_MAX_CONNECTIONS,
+            channel_buffer: DEFAULT_CHANNEL_BUFFER,
         }
+    }
+
+    /// Set the maximum number of concurrent SSH connections. Default: 100.
+    pub fn with_max_connections(mut self, max: usize) -> Self {
+        self.max_connections = max;
+        self
+    }
+
+    /// Set the per-connection terminal output channel buffer size.
+    /// Frames are dropped (not buffered) when the buffer is full. Default: 64.
+    pub fn with_channel_buffer(mut self, size: usize) -> Self {
+        self.channel_buffer = size;
+        self
     }
 
     pub async fn run(&mut self, config: Config) -> Result<(), anyhow::Error> {
@@ -95,9 +184,14 @@ impl<T: ChaiApp + Send + 'static> ChaiServer<T> {
             .with_file(true)
             .with_line_number(true)
             .with_target(true)
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "info".into()),
+            )
             .finish();
 
-        tracing::subscriber::set_global_default(subscriber).unwrap();
+        // Silently ignore the error if a global subscriber is already set.
+        let _ = tracing::subscriber::set_global_default(subscriber);
 
         let clients = self.clients.clone();
         tokio::spawn(async move {
@@ -159,12 +253,25 @@ impl<T: ChaiApp + Send + 'static> Handler for ChaiServer<T> {
         channel: Channel<Msg>,
         session: &mut Session,
     ) -> Result<bool, Self::Error> {
+        {
+            let clients = self.clients.lock().await;
+            if clients.len() >= self.max_connections {
+                tracing::warn!(
+                    "max connections ({}) reached, rejecting session for {}",
+                    self.max_connections,
+                    self.username
+                );
+                return Ok(false);
+            }
+        }
+
         tracing::info!("{} (id: {}) opened a channel", self.username, self.id);
         let terminal_handle = TerminalHandle::start(
             session.handle(),
             channel.id(),
             self.username.clone(),
             self.id,
+            self.channel_buffer,
         )
         .await;
 
@@ -200,20 +307,40 @@ impl<T: ChaiApp + Send + 'static> Handler for ChaiServer<T> {
         data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        match data {
-            // Pressing 'q' closes the connection.
-            b"q" => {
-                self.send_data_or_log(session, channel, EXIT_ALT_SCREEN, "exit alternate screen");
-                self.send_data_or_log(session, channel, SHOW_CURSOR, "show cursor");
+        // Input validation: Only allow printable ASCII and control chars
+        if !data
+            .iter()
+            .all(|&b| b == b'\n' || b == b'\r' || (b >= 0x20 && b <= 0x7e))
+        {
+            tracing::warn!(
+                "Received invalid input data from user {} (id: {})",
+                self.username,
+                self.id
+            );
+            return Ok(());
+        }
 
-                self.clients.lock().await.remove(&self.id);
-                session.close(channel)?;
-            }
-            _ => {
-                let mut clients = self.clients.lock().await;
-                let (_, app) = clients.get_mut(&self.id).unwrap();
+        let should_quit = {
+            let mut clients = self.clients.lock().await;
+            if let Some((terminal, app)) =
+                self.get_client_mut(&mut clients, "data handler", self.id)
+            {
                 app.handle_input(data);
+                let quit = app.should_quit();
+                if !quit {
+                    self.try_draw(terminal, app);
+                }
+                quit
+            } else {
+                false
             }
+        };
+
+        if should_quit {
+            self.send_data_or_log(session, channel, EXIT_ALT_SCREEN, "exit alternate screen");
+            self.send_data_or_log(session, channel, SHOW_CURSOR, "show cursor");
+            self.clients.lock().await.remove(&self.id);
+            session.close(channel)?;
         }
 
         Ok(())
@@ -236,8 +363,11 @@ impl<T: ChaiApp + Send + 'static> Handler for ChaiServer<T> {
         };
 
         let mut clients = self.clients.lock().await;
-        let (terminal, _) = clients.get_mut(&self.id).unwrap();
-        terminal.resize(rect)?;
+        if let Some(terminal) =
+            self.get_terminal_mut(&mut clients, "window_change_request", self.id)
+        {
+            terminal.resize(rect)?;
+        }
 
         Ok(())
     }
@@ -262,14 +392,26 @@ impl<T: ChaiApp + Send + 'static> Handler for ChaiServer<T> {
 
         {
             let mut clients = self.clients.lock().await;
-            let (terminal, _) = clients.get_mut(&self.id).unwrap();
-            terminal.resize(rect)?;
+            if let Some(terminal) =
+                self.get_terminal_mut(&mut clients, "pty_request (resize)", self.id)
+            {
+                terminal.resize(rect)?;
+            }
         }
 
         session.channel_success(channel)?;
 
         self.send_data_or_log(session, channel, ENTER_ALT_SCREEN, "enter alternate screen");
         self.send_data_or_log(session, channel, HIDE_CURSOR, "hide cursor");
+
+        {
+            let mut clients = self.clients.lock().await;
+            if let Some((terminal, app)) =
+                self.get_client_mut(&mut clients, "pty_request (draw)", self.id)
+            {
+                self.try_draw(terminal, app);
+            }
+        }
 
         Ok(())
     }
@@ -283,19 +425,25 @@ impl<T: ChaiApp + Send + 'static> Handler for ChaiServer<T> {
         let reset_sequence = [EXIT_ALT_SCREEN, SHOW_CURSOR].concat();
         let _ = session.data(channel, reset_sequence.into());
 
-        self.clients.lock().await.remove(&self.id);
+        let mut clients = self.clients.lock().await;
+        if clients.remove(&self.id).is_none() {
+            tracing::warn!("No client found for id {} in channel_close", self.id);
+        }
         Ok(())
     }
 }
 
 impl<T: ChaiApp + Send + 'static> Drop for ChaiServer<T> {
     fn drop(&mut self) {
+        // Synchronous cleanup: block on removing the client
         let id = self.id;
         let clients = self.clients.clone();
-        tokio::spawn(async move {
-            let mut clients = clients.lock().await;
-            clients.remove(&id);
-        });
+        if let Ok(mut guard) = clients.try_lock() {
+            guard.remove(&id);
+        } else {
+            // If we can't lock, log and skip
+            tracing::warn!("Could not lock clients for cleanup in Drop for id {}", id);
+        }
     }
 }
 

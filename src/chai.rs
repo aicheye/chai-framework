@@ -1,8 +1,13 @@
 use ratatui::Frame;
 
-pub trait ChaiApp: Copy + Clone {
+pub trait ChaiApp {
     fn new() -> Self;
     fn update(&mut self);
     fn draw(&mut self, f: &mut Frame);
     fn handle_input(&mut self, data: &[u8]);
+    /// Return true to signal that the SSH connection should be closed.
+    /// The default implementation always returns false.
+    fn should_quit(&self) -> bool {
+        false
+    }
 }
