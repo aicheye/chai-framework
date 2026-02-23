@@ -37,5 +37,5 @@ For examples, see [here](https://github.com/kllarena07/chai/tree/main/examples).
 
 ## Contributors
 <a href="https://github.com/kllarena07/chai-framework/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=kllarena07/chai-framework" />
+  <img src="https://contrib.rocks/image?repo=kllarena07/chai-framework&v=2026-02-23" />
 </a>
