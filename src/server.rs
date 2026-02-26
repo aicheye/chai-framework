@@ -73,11 +73,12 @@ impl TerminalHandle {
             while let Some(data) = receiver.recv().await {
                 let result = handle.data(channel_id, data.into()).await;
                 if result.is_err() {
-                    tracing::error!(
-                        "failed to send data for user {} (id: {}): {result:?}",
+                    tracing::debug!(
+                        "channel closed for user {} (id: {}), stopping data forwarding",
                         username_clone,
                         id_clone
                     );
+                    break;
                 }
             }
         });
@@ -278,10 +279,10 @@ impl<T: ChaiApp + Send + 'static> Handler for ChaiServer<T> {
         data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        // Input validation: Only allow printable ASCII and control chars
+        // Input validation: Only allow printable ASCII, control chars, and escape sequences
         if !data
             .iter()
-            .all(|&b| b == b'\n' || b == b'\r' || (0x20..=0x7e).contains(&b))
+            .all(|&b| b == b'\n' || b == b'\r' || b == 0x1b || (0x20..=0x7e).contains(&b))
         {
             tracing::warn!(
                 "Received invalid input data from user {} (id: {})",
@@ -310,7 +311,6 @@ impl<T: ChaiApp + Send + 'static> Handler for ChaiServer<T> {
         if should_quit {
             self.send_data_or_log(session, channel, EXIT_ALT_SCREEN, "exit alternate screen");
             self.send_data_or_log(session, channel, SHOW_CURSOR, "show cursor");
-            self.clients.lock().await.remove(&self.id);
             session.close(channel)?;
         }
 
